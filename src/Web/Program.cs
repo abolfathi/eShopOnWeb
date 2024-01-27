@@ -1,5 +1,6 @@
 ﻿using System.Net.Mime;
 using Ardalis.ListStartupServices;
+using Azure.Identity;
 using BlazorAdmin;
 using BlazorAdmin.Services;
 using Blazored.LocalStorage;
@@ -8,6 +9,7 @@ using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc.ApplicationModels;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.eShopWeb;
 using Microsoft.eShopWeb.ApplicationCore.Interfaces;
 using Microsoft.eShopWeb.Infrastructure.Data;
@@ -18,10 +20,27 @@ using Microsoft.eShopWeb.Web.HealthChecks;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 
 var builder = WebApplication.CreateBuilder(args);
-
 builder.Logging.AddConsole();
 
-Microsoft.eShopWeb.Infrastructure.Dependencies.ConfigureServices(builder.Configuration, builder.Services);
+if (builder.Environment.IsDevelopment() || builder.Environment.EnvironmentName == "Docker"){
+    // Configure SQL Server (local)
+    Microsoft.eShopWeb.Infrastructure.Dependencies.ConfigureServices(builder.Configuration, builder.Services);
+}
+else{
+    // Configure SQL Server (prod)
+    var credential = new ChainedTokenCredential(new AzureDeveloperCliCredential(), new DefaultAzureCredential());
+    builder.Configuration.AddAzureKeyVault(new Uri(builder.Configuration["AZURE_KEY_VAULT_ENDPOINT"] ?? ""), credential);
+    builder.Services.AddDbContext<CatalogContext>(c =>
+    {
+        var connectionString = builder.Configuration[builder.Configuration["AZURE_SQL_CATALOG_CONNECTION_STRING_KEY"] ?? ""];
+        c.UseSqlServer(connectionString, sqlOptions => sqlOptions.EnableRetryOnFailure());
+    });
+    builder.Services.AddDbContext<AppIdentityDbContext>(options =>
+    {
+        var connectionString = builder.Configuration[builder.Configuration["AZURE_SQL_IDENTITY_CONNECTION_STRING_KEY"] ?? ""];
+        options.UseSqlServer(connectionString, sqlOptions => sqlOptions.EnableRetryOnFailure());
+    });
+}
 
 builder.Services.AddCookieSettings();
 
@@ -82,7 +101,7 @@ var baseUrlConfig = configSection.Get<BaseUrlConfiguration>();
 // Blazor Admin Required Services for Prerendering
 builder.Services.AddScoped<HttpClient>(s => new HttpClient
 {
-    BaseAddress = new Uri(baseUrlConfig.WebBase)
+    BaseAddress = new Uri(baseUrlConfig!.WebBase)
 });
 
 // add blazor services
@@ -171,15 +190,13 @@ app.UseCookiePolicy();
 app.UseAuthentication();
 app.UseAuthorization();
 
-app.UseEndpoints(endpoints =>
-{
-    endpoints.MapControllerRoute("default", "{controller:slugify=Home}/{action:slugify=Index}/{id?}");
-    endpoints.MapRazorPages();
-    endpoints.MapHealthChecks("home_page_health_check", new HealthCheckOptions { Predicate = check => check.Tags.Contains("homePageHealthCheck") });
-    endpoints.MapHealthChecks("api_health_check", new HealthCheckOptions { Predicate = check => check.Tags.Contains("apiHealthCheck") });
-    //endpoints.MapBlazorHub("/admin");
-    endpoints.MapFallbackToFile("index.html");
-});
+
+app.MapControllerRoute("default", "{controller:slugify=Home}/{action:slugify=Index}/{id?}");
+app.MapRazorPages();
+app.MapHealthChecks("home_page_health_check", new HealthCheckOptions { Predicate = check => check.Tags.Contains("homePageHealthCheck") });
+app.MapHealthChecks("api_health_check", new HealthCheckOptions { Predicate = check => check.Tags.Contains("apiHealthCheck") });
+//endpoints.MapBlazorHub("/admin");
+app.MapFallbackToFile("index.html");
 
 app.Logger.LogInformation("LAUNCHING");
 app.Run();
